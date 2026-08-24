@@ -38,7 +38,7 @@ jobs:
       password: ${{ secrets.REGISTRY_PASSWORD }}
 ```
 
-`Dockerfile.assemble` should COPY the artifact from `<context>/.build-artifact/` (default) and perform only the arch-specific runtime install.
+`Dockerfile.assemble` should COPY the artifact from `<context>/build-artifact/` (default) and perform only the arch-specific runtime install.
 
 ## Inputs
 
@@ -49,7 +49,7 @@ jobs:
 | `dockerfile`      | no       | `./Dockerfile.assemble` | Path to the assemble Dockerfile.                                                 |
 | `tags`            | yes      | —                   | Tags for the final multi-arch manifest (`docker/metadata-action` format).            |
 | `artifact-name`   | yes      | —                   | Name of the artifact uploaded via `actions/upload-artifact`.                         |
-| `artifact-path`   | no       | `.build-artifact`   | Path under the context where the artifact is extracted before docker build.          |
+| `artifact-path`   | no       | `build-artifact`   | Path under the context where the artifact is extracted before docker build.          |
 | `build-args`      | no       | `""`                | Build args (`key=value` per line).                                                   |
 | `registry`        | no       | `vars.P6M_ARTIFACTORY_HOSTNAME` | Docker registry hostname.                                                |
 | `linux-arm-runner`| no       | `ubuntu-24.04-arm`  | `runs-on` tag for the arm64 runner.                                                  |

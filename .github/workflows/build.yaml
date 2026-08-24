@@ -62,9 +62,9 @@ on:
         type: string
         required: true
       artifact-path:
-        description: Subpath inside the docker context where the artifact should be extracted. The Dockerfile is expected to COPY from this path.
+        description: Subpath inside the docker context where the artifact should be extracted. The Dockerfile is expected to COPY from this path. Do NOT start with a dot — actions/upload-artifact@v7 filters hidden entries by default.
         type: string
-        default: ".build-artifact"
+        default: "build-artifact"
         required: false
       linux-arm-runner:
         description: runs-on tag for the linux/arm64 runner.
