@@ -1,0 +1,225 @@
+name: Build & Push Multi-Arch Docker Image (from artifact)
+
+# Optimized fork of p6m-dev/github-actions/build-deploy-docker.yaml.
+#
+# Difference vs upstream: the caller is expected to have already built the
+# arch-independent application artifact (JS bundle, dist assets, etc.) and
+# uploaded it via actions/upload-artifact. This workflow downloads that
+# artifact once, then each per-arch docker build only does the arch-specific
+# assembly + runtime install. The heavy yarn install + yarn build no longer
+# runs twice (once per arch).
+
+on:
+  workflow_call:
+    outputs:
+      digest:
+        value: ${{ jobs.merge.outputs.digest }}
+      tags:
+        value: ${{ jobs.merge.outputs.tags }}
+    secrets:
+      username:
+        description: Docker registry username.
+        required: true
+      password:
+        description: Docker registry password.
+        required: true
+    inputs:
+      github_ref:
+        description: Ref to checkout. Defaults to the ref that triggered the workflow.
+        type: string
+        default: ""
+        required: false
+      registry:
+        description: Docker registry hostname. Falls back to var P6M_ARTIFACTORY_HOSTNAME.
+        type: string
+        required: false
+      image-name:
+        description: Namespaced image name (no registry prefix).
+        type: string
+        default: ${{ github.repository }}
+        required: false
+      context:
+        description: Docker build context path.
+        type: string
+        default: "."
+        required: false
+      dockerfile:
+        description: Path to the assemble Dockerfile (should NOT re-run yarn build).
+        type: string
+        default: "./Dockerfile.assemble"
+        required: false
+      build-args:
+        description: Build args (key=value per line).
+        type: string
+        default: ""
+        required: false
+      tags:
+        description: Tags to apply to the final multi-arch manifest (docker/metadata-action format).
+        type: string
+        required: true
+      artifact-name:
+        description: Name of the artifact (uploaded by the caller via actions/upload-artifact) containing the pre-built app payload. The artifact will be downloaded into `<context>/.build-artifact/` before docker build.
+        type: string
+        required: true
+      artifact-path:
+        description: Subpath inside the docker context where the artifact should be extracted. The Dockerfile is expected to COPY from this path.
+        type: string
+        default: ".build-artifact"
+        required: false
+      linux-arm-runner:
+        description: runs-on tag for the linux/arm64 runner.
+        type: string
+        required: false
+        default: ubuntu-24.04-arm
+      push:
+        description: Push the built images. Set false to only refresh cache.
+        type: boolean
+        required: false
+        default: true
+
+env:
+  DOCKER_REGISTRY: ${{ inputs.registry || vars.P6M_ARTIFACTORY_HOSTNAME }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ${{ inputs.linux-arm-runner }}
+            platform: linux/arm64
+            arch: arm64
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+
+    name: Docker Assemble (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.github_ref }}
+
+      - name: Download pre-built application artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.context }}/${{ inputs.artifact-path }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Repo
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ secrets.username }}
+          password: ${{ secrets.password }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.arch }}-assemble
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}-assemble
+          build-args: ${{ inputs.build-args }}
+          outputs: |
+            type=image,name=${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }},push=${{ inputs.push }},push-by-digest=true,name-canonical=true
+
+      - name: Export digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          echo "${{ steps.build.outputs.digest }}" > "${RUNNER_TEMP}/digests/digest-${{ matrix.arch }}.txt"
+
+      - name: Verify image manifest
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }}@${DIGEST}"
+          echo "Inspecting $IMAGE ..."
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' | jq -e '.manifest.mediaType, .manifest.digest' >/dev/null
+          echo "OK: manifest present and well-formed."
+
+      - name: Upload Image Digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    if: ${{ inputs.push }}
+    needs:
+      - build
+
+    name: Create Multi-Arch Manifest
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.fanciness.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Download Image Digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to Docker Repo
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ secrets.username }}
+          password: ${{ secrets.password }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }}
+          tags: ${{ inputs.tags }}
+
+      - name: Setup args for Buildx imagetools
+        run: |
+          echo "IMAGETOOLS_TAGS=$(echo ${DOCKER_METADATA_OUTPUT_TAGS} | xargs -n1 printf '\-t %s ')" >> $GITHUB_ENV
+          echo "IMAGETOOLS_SOURCES=$(cat ${RUNNER_TEMP}/digests/* | xargs -n1 printf '${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }}@%s ')" >> $GITHUB_ENV
+
+      - name: Docker Build/Push Multi-Arch Image
+        id: imagetools
+        run: |
+          set -o pipefail
+          docker buildx imagetools create --progress rawjson ${{ env.IMAGETOOLS_TAGS }} ${{ env.IMAGETOOLS_SOURCES }} 2>&1 | tee temp.json
+          cat temp.json | jq --exit-status --compact-output --monochrome-output --slurp 'map(select(. | has("vertexes"))) | map(.vertexes) | flatten | map({"digest": .digest, "name": (.name | ltrimstr("[internal] pushing "))})' > output.json
+          echo 'json<<JSON' >> $GITHUB_OUTPUT
+          cat output.json >> $GITHUB_OUTPUT
+          echo 'JSON' >> $GITHUB_OUTPUT
+
+      - name: Resolve final manifest digest
+        id: fanciness
+        run: |
+          THE_TAG=$(echo '${{ steps.imagetools.outputs.json }}' | jq --exit-status --raw-output 'map(.name) | .[0]')
+          THE_DIGEST=$(docker buildx imagetools inspect "$THE_TAG" --format '{{. | json}}' | jq --raw-output '.manifest.digest')
+          echo "digest=$THE_DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Verify final multi-arch manifest
+        run: |
+          IMAGE="${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }}@${{ steps.fanciness.outputs.digest }}"
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' \
+            | jq -e '.manifest.manifests | length >= 2' >/dev/null
+          echo "OK: multi-arch manifest lists >= 2 platforms."
+
+      - name: Summarize Job
+        run: |
+          {
+            echo "**Docker image digest:** ${{ steps.fanciness.outputs.digest }}"
+            echo "### Docker Tags"
+            echo '```'
+            echo "$DOCKER_METADATA_OUTPUT_TAGS"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
