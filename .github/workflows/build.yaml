@@ -71,6 +71,11 @@ on:
         type: string
         required: false
         default: ubuntu-24.04-arm
+      platforms:
+        description: Comma-separated list of platforms to build (e.g. "linux/amd64" or "linux/amd64,linux/arm64"). Defaults to both.
+        type: string
+        required: false
+        default: "linux/amd64,linux/arm64"
       push:
         description: Push the built images. Set false to only refresh cache.
         type: boolean
@@ -95,6 +100,7 @@ jobs:
 
     name: Docker Assemble (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
+    if: contains(inputs.platforms, matrix.platform)
 
     steps:
       - uses: actions/checkout@v6
@@ -210,9 +216,14 @@ jobs:
       - name: Verify final multi-arch manifest
         run: |
           IMAGE="${{ env.DOCKER_REGISTRY }}/${{ inputs.image-name }}@${{ steps.fanciness.outputs.digest }}"
-          docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' \
-            | jq -e '.manifest.manifests | length >= 2' >/dev/null
-          echo "OK: multi-arch manifest lists >= 2 platforms."
+          EXPECTED=$(echo "${{ inputs.platforms }}" | tr ',' '\n' | grep -c .)
+          ACTUAL=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' \
+            | jq '[.manifest.manifests[] | select(.platform.os != "unknown")] | length')
+          if [ "$ACTUAL" -ne "$EXPECTED" ]; then
+            echo "::error::Manifest platform count mismatch: expected $EXPECTED, got $ACTUAL"
+            exit 1
+          fi
+          echo "OK: manifest contains exactly $ACTUAL platform(s) as requested."
 
       - name: Summarize Job
         run: |
