@@ -96,12 +96,12 @@ jobs:
         run: |
           INCLUDES='[]'
           if echo "${{ inputs.platforms }}" | grep -q "linux/arm64"; then
-            INCLUDES=$(echo "$INCLUDES" | jq '. += [{"runner":"${{ inputs.linux-arm-runner }}","platform":"linux/arm64","arch":"arm64"}]')
+            INCLUDES=$(echo "$INCLUDES" | jq -c '. += [{"runner":"${{ inputs.linux-arm-runner }}","platform":"linux/arm64","arch":"arm64"}]')
           fi
           if echo "${{ inputs.platforms }}" | grep -q "linux/amd64"; then
-            INCLUDES=$(echo "$INCLUDES" | jq '. += [{"runner":"ubuntu-latest","platform":"linux/amd64","arch":"amd64"}]')
+            INCLUDES=$(echo "$INCLUDES" | jq -c '. += [{"runner":"ubuntu-latest","platform":"linux/amd64","arch":"amd64"}]')
           fi
-          echo "matrix=$(echo '{}' | jq --argjson inc "$INCLUDES" '.include = $inc')" >> $GITHUB_OUTPUT
+          echo "matrix=$(jq -cn --argjson inc "$INCLUDES" '{"include":$inc}')" >> $GITHUB_OUTPUT
 
   build:
     needs: setup-matrix
